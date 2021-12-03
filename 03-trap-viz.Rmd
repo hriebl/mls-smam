@@ -1,0 +1,332 @@
+---
+title: "MLS-SMAM -- Trap -- Visualization"
+author: "Ieva, Scott, Hannes"
+date: "November 30, 2021"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+load("data/trap.RData")
+
+knitr::opts_chunk$set(dev = c("png", "pdf"), dpi = 600, echo = TRUE,
+                      fig.path = "figures/")
+
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(mvtnorm)
+library(purrr)
+library(stringr)
+library(tidyr)
+
+theme_set(theme_minimal())
+
+theme_update(
+  text = element_text(size = 12),
+  axis.text = element_text(color = "black", size = NA),
+  axis.text.x = element_text(margin = margin(4, 0, 0, 0, "pt")),
+  axis.text.y = element_text(margin = margin(0, 4, 0, 0, "pt")),
+  axis.ticks = element_line(),
+  axis.ticks.length = unit(4, "pt"),
+  axis.title.x = element_text(margin = margin(7.5, 0, 0, 0, "pt")),
+  axis.title.y = element_text(margin = margin(0, 7.5, 0, 0, "pt")),
+  legend.text = element_text(size = NA),
+  panel.border = element_rect(fill = NA),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(color = "black", size = NA)
+)
+```
+
+## Capture probabilities
+
+```{r trap-prob-both, echo = FALSE}
+min_cov_area <- quantile(mls$CovArea, 0.025)
+max_cov_area <- quantile(mls$CovArea, 0.975)
+
+newdata <- expand_grid(
+  CovArea = seq.int(min_cov_area, max_cov_area, length.out = 100),
+  Daytime = unique(df$Daytime),
+  Site = unique(df$Site),
+  Check = first(df$Check),
+  PlotID = first(df$PlotID),
+  TrapNum = first(df$TrapNum)
+)
+
+# parametric effects
+X <- predict(mod, newdata, type = "lpmatrix")
+X <- X[, 1:5]
+
+newdata_tmp <- expand_grid(
+  CovArea = mean(df$CovArea),
+  Daytime = first(df$Daytime),
+  Site = first(df$Site),
+  Check = unique(df$Check),
+  PlotID = first(df$PlotID),
+  TrapNum = first(df$TrapNum)
+)
+
+# s(Check)
+X_tmp <- predict(mod, newdata_tmp, type = "lpmatrix")
+X_tmp <- colMeans(X_tmp[, 6:26])
+
+X_tmp <- matrix(X_tmp, nrow = 600, ncol = 21, byrow = TRUE)
+X <- cbind(X, X_tmp)
+
+newdata_tmp <- expand_grid(
+  CovArea = mean(df$CovArea),
+  Daytime = first(df$Daytime),
+  Site = first(df$Site),
+  Check = first(df$Check),
+  PlotID = unique(df$PlotID),
+  TrapNum = unique(df$TrapNum)
+)
+
+# s(PlotID) and s(TrapNum)
+X_tmp <- predict(mod, newdata_tmp, type = "lpmatrix")
+X_tmp <- colMeans(X_tmp[, 27:922])
+
+X_tmp <- matrix(X_tmp, nrow = 600, ncol = 896, byrow = TRUE)
+X <- cbind(X, X_tmp)
+
+beta <- coef(mod)
+beta_m <- beta[1:922]  # coefficients for mice
+beta_v <- beta[923:1844]  # and for voles
+
+eta_m <- drop(X %*% beta_m)
+eta_v <- drop(X %*% beta_v)
+
+p_m = exp(eta_m) / (1 + exp(eta_m) + exp(eta_v))
+p_v = exp(eta_v) / (1 + exp(eta_m) + exp(eta_v))
+p_0 = 1 - p_m - p_v
+
+p <- cbind(newdata, Mouse = p_m, Vole = p_v, None = p_0) %>%
+  pivot_longer(cols = c(Mouse, Vole, None), names_to = "Capture", values_to = "Probability") %>%
+  mutate(Capture = factor(Capture, levels = c("None", "Vole", "Mouse")))
+
+ggplot(p) +
+  facet_grid(vars(Daytime), vars(Site)) +
+  geom_area(aes(CovArea, Probability, fill = Capture)) +
+  xlab("Standardized understory roughness") +
+  ylab("Capture probability") +
+  scale_x_continuous(expand = expansion(mult = 0, add = 0)) +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0)) +
+  scale_fill_brewer(palette = "Set2") +
+  theme(panel.spacing.y = unit(1, "lines"))
+```
+
+```{r trap-prob-mouse-narrow, echo = FALSE}
+n_sim <- 5000
+beta <- matrix(coef(mod), nrow = n_sim, ncol = 1844, byrow = TRUE)
+beta[, 2] <- rnorm(n_sim, coef(mod)[2], vcov(mod)[2, 2])  # CovArea coefficient for mice
+beta_m <- beta[, 1:922]  # coefficients for mice
+beta_v <- beta[, 923:1844]  # and for voles
+
+eta_m <- tcrossprod(X, beta_m)
+eta_v <- tcrossprod(X, beta_v)
+
+p_m = exp(eta_m) / (1 + exp(eta_m) + exp(eta_v))
+p_v = exp(eta_v) / (1 + exp(eta_m) + exp(eta_v))
+
+q <- cbind(newdata, p_m) %>%
+  pivot_longer(
+    cols = (ncol(.) - n_sim + 1):ncol(.),
+    names_to = "Replication",
+    values_to = "Probability"
+  )
+
+ggplot(q, aes(CovArea, Probability)) +
+  facet_grid(vars(Daytime), vars(Site)) +
+  geom_line(aes(group = Replication), alpha = 0.01, color = "#8da0cb") +
+  geom_line(data = p %>% filter(Capture == "Mouse")) +
+  ggtitle("Capture probability for mice") +
+  xlab("Standardized understory roughness") +
+  ylab("Capture probability") +
+  scale_x_continuous(expand = expansion(mult = 0, add = 0)) +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = 0, add = 0)) +
+  theme(panel.spacing.y = unit(1, "lines"))
+```
+
+```{r trap-prob-vole-narrow, echo = FALSE}
+n_sim <- 5000
+beta <- matrix(coef(mod), nrow = n_sim, ncol = 1844, byrow = TRUE)
+beta[, 924] <- rnorm(n_sim, coef(mod)[924], vcov(mod)[924, 924])  # CovArea coefficient for voles
+beta_m <- beta[, 1:922]  # coefficients for mice
+beta_v <- beta[, 923:1844]  # and for voles
+
+eta_m <- tcrossprod(X, beta_m)
+eta_v <- tcrossprod(X, beta_v)
+
+p_m = exp(eta_m) / (1 + exp(eta_m) + exp(eta_v))
+p_v = exp(eta_v) / (1 + exp(eta_m) + exp(eta_v))
+
+q <- cbind(newdata, p_v) %>%
+  pivot_longer(
+    cols = (ncol(.) - n_sim + 1):ncol(.),
+    names_to = "Replication",
+    values_to = "Probability"
+  )
+
+ggplot(q, aes(CovArea, Probability)) +
+  facet_grid(vars(Daytime), vars(Site)) +
+  geom_line(aes(group = Replication), alpha = 0.01, color = "#fc8d62") +
+  geom_line(data = p %>% filter(Capture == "Vole")) +
+  ggtitle("Capture probability for voles") +
+  xlab("Standardized understory roughness") +
+  ylab("Capture probability") +
+  scale_x_continuous(expand = expansion(mult = 0, add = 0)) +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = 0, add = 0)) +
+  theme(panel.spacing.y = unit(1, "lines"))
+```
+
+```{r trap-prob-mouse-wide, echo = FALSE}
+n_sim <- 5000
+beta <- rmvnorm(n_sim, coef(mod), vcov(mod))
+beta_m <- beta[, 1:922]  # coefficients for mice
+beta_v <- beta[, 923:1844]  # and for voles
+
+eta_m <- tcrossprod(X, beta_m)
+eta_v <- tcrossprod(X, beta_v)
+
+p_m = exp(eta_m) / (1 + exp(eta_m) + exp(eta_v))
+p_v = exp(eta_v) / (1 + exp(eta_m) + exp(eta_v))
+
+q <- cbind(newdata, p_m) %>%
+  pivot_longer(
+    cols = (ncol(.) - n_sim + 1):ncol(.),
+    names_to = "Replication",
+    values_to = "Probability"
+  )
+
+ggplot(q, aes(CovArea, Probability)) +
+  facet_grid(vars(Daytime), vars(Site)) +
+  geom_line(aes(group = Replication), alpha = 0.01, color = "#8da0cb") +
+  geom_line(data = p %>% filter(Capture == "Mouse")) +
+  ggtitle("Capture probability for mice") +
+  xlab("Standardized understory roughness") +
+  ylab("Capture probability") +
+  scale_x_continuous(expand = expansion(mult = 0, add = 0)) +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = 0, add = 0)) +
+  theme(panel.spacing.y = unit(1, "lines"))
+```
+
+```{r trap-prob-vole-wide, echo = FALSE}
+q <- cbind(newdata, p_v) %>%
+  pivot_longer(
+    cols = (ncol(.) - n_sim + 1):ncol(.),
+    names_to = "Replication",
+    values_to = "Probability"
+  )
+
+ggplot(q, aes(CovArea, Probability)) +
+  facet_grid(vars(Daytime), vars(Site)) +
+  geom_line(aes(group = Replication), alpha = 0.01, color = "#fc8d62") +
+  geom_line(data = p %>% filter(Capture == "Vole")) +
+  ggtitle("Capture probability for voles") +
+  xlab("Standardized understory roughness") +
+  ylab("Capture probability") +
+  scale_x_continuous(expand = expansion(mult = 0, add = 0)) +
+  scale_y_continuous(limits = c(0, 1), expand = expansion(mult = 0, add = 0)) +
+  theme(panel.spacing.y = unit(1, "lines"))
+```
+
+## Spatial correlation
+
+```{r trap-corr-mouse, echo = FALSE}
+newdata <- expand_grid(
+  CovArea = mean(df$CovArea),
+  Daytime = first(df$Daytime),
+  Site = unique(df$Site),
+  Check = first(df$Check),
+  PlotID = unique(df$PlotID),
+  TrapNum = unique(df$TrapNum)
+)
+
+newdata <- newdata %>%
+  separate(PlotID, c("Site2", "Plot"), sep = "_", remove = FALSE) %>%
+  filter(PlotID != "8_2", Site == Site2) %>%
+  select(-c(Site2, Plot))
+
+p <- predict(mod, newdata, type = "terms")
+p <- rowSums(p[, str_detect(colnames(p), "s\\(TrapNum\\)")])
+p <- cbind(newdata, Prediction = p)
+
+p <- p %>%
+  separate(PlotID, c(NA, "Plot"), sep = "_") %>%
+  separate(TrapNum, c("TrapNum1", "TrapNum2"), sep = 1) %>%
+  select(Site, Plot, TrapNum1, TrapNum2, Prediction)
+
+ggplot(p, aes(TrapNum1, TrapNum2, fill = Prediction)) +
+  facet_grid(vars(Site), vars(Plot)) +
+  geom_tile() +
+  ggtitle("Spatial correlation for mice") +
+  xlab(NULL) +
+  ylab(NULL) +
+  scale_x_discrete(expand = expansion(mult = 0, add = 0)) +
+  scale_y_discrete(expand = expansion(mult = 0, add = 0)) +
+  scale_fill_viridis_c(option = "viridis")
+```
+
+```{r trap-corr-vole, echo = FALSE}
+p <- predict(mod, newdata, type = "terms")
+p <- rowSums(p[, str_detect(colnames(p), "s\\.1\\(TrapNum\\)")])
+p <- cbind(newdata, Prediction = p)
+
+p <- p %>%
+  separate(PlotID, c(NA, "Plot"), sep = "_") %>%
+  separate(TrapNum, c("TrapNum1", "TrapNum2"), sep = 1) %>%
+  select(Site, Plot, TrapNum1, TrapNum2, Prediction)
+
+ggplot(p, aes(TrapNum1, TrapNum2, fill = Prediction)) +
+  facet_grid(vars(Site), vars(Plot)) +
+  geom_tile() +
+  ggtitle("Spatial correlation for voles") +
+  xlab(NULL) +
+  ylab(NULL) +
+  scale_x_discrete(expand = expansion(mult = 0, add = 0)) +
+  scale_y_discrete(expand = expansion(mult = 0, add = 0)) +
+  scale_fill_viridis_c(option = "viridis")
+```
+
+## Distribution of the understory roughness
+
+```{r trap-mls-dist, echo = FALSE}
+ggplot(mls, aes(CovArea)) +
+  facet_wrap(vars(Site)) +
+  geom_freqpoly(bins = 15) +
+  xlab("Standardized understory roughness") +
+  ylab("Count")
+```
+
+```{r trap-mls-dist-tab, echo = FALSE, results = "asis"}
+X <- predict(mod, type = "lpmatrix")
+X <- colMeans(X)
+
+probs <- c(0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
+cov_area <- quantile(mls$CovArea, probs)
+
+X <- matrix(X, nrow = 9, ncol = 1844, byrow = TRUE)
+X[, 2] <- cov_area
+X[, 924] <- cov_area
+
+eta_m <- drop(X[, 1:922] %*% coef(mod)[1:922])
+eta_v <- drop(X[, 923:1844] %*% coef(mod)[923:1844])
+
+p_m <- exp(eta_m) / (1 + exp(eta_m) + exp(eta_v))
+p_v <- exp(eta_v) / (1 + exp(eta_m) + exp(eta_v))
+
+tab <- rbind(Mouse = p_m, Vole = p_v, Sum = p_m + p_v)
+tab <- map_chr(tab, ~ str_interp("$[.2f]{100 * .x}%"))
+tab <- matrix(tab, nrow = 3)
+
+rownames(tab) <- c("Mouse", "Vole", "Sum")
+cn <- map2_chr(cov_area, probs, ~ str_interp("$[.2f]{.x} ($[.0f]{100 * .y}%)"))
+colnames(tab) <- cn
+
+caption <- str_c("Predicted capture probabilities for the averaged ",
+                 "explanatory variables and different values of the ",
+                 "standardized understory roughness ",
+                 "(quantiles in parenthesis)")
+
+knitr::kable(tab, align = "r", caption = caption)
+```

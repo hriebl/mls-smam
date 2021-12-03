@@ -1,0 +1,192 @@
+---
+title: "MLS-SMAM -- Plot"
+author: "Ieva, Scott, Hannes"
+date: "November 30, 2021"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(dev = c("png", "pdf"), dpi = 600, echo = TRUE,
+                      fig.path = "figures/")
+
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(readxl)
+library(stargazer)
+library(tidyr)
+
+theme_set(theme_minimal())
+
+theme_update(
+  text = element_text(size = 12),
+  axis.text = element_text(color = "black", size = NA),
+  axis.text.x = element_text(margin = margin(4, 0, 0, 0, "pt")),
+  axis.text.y = element_text(margin = margin(0, 4, 0, 0, "pt")),
+  axis.ticks = element_line(),
+  axis.ticks.length = unit(4, "pt"),
+  axis.title.x = element_text(margin = margin(7.5, 0, 0, 0, "pt")),
+  axis.title.y = element_text(margin = margin(0, 7.5, 0, 0, "pt")),
+  legend.text = element_text(size = NA),
+  panel.border = element_rect(fill = NA),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  strip.text = element_text(color = "black", size = NA)
+)
+```
+
+```{r data, include = FALSE}
+load("data/mls-smam.RData")
+dens <- read_csv("data/density.csv")
+veg <- read_excel("data/vegetation.xlsx")
+
+scale_one <- function(x) scale(x)[, 1]
+
+new_sites <- function(x) {
+  case_when(x == "1" ~ "Kamschlacken", x == "7" ~ "Göhrde",
+            x == "8" ~ "Tosterglope")
+}
+
+mls <- complexity %>%
+  mutate(
+    Site = new_sites(Site),
+    Plot = as.character(Plot),
+    across(c(CovArea, BoxDim), scale_one)
+  ) %>%
+  unite(PlotID, c(Site, Plot), sep = "_", remove = FALSE) %>%
+  group_by(PlotID, Site, Plot) %>%
+  summarize(across(c(CovArea, BoxDim), mean, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(across(c(CovArea, BoxDim), scale_one))
+
+dens <- dens %>%
+  mutate(site = new_sites(site)) %>%
+  unite(PlotID, c(site, plot), sep = "_", remove = FALSE) %>%
+  filter(campaign == 5) %>%
+  select(
+    PlotID    = PlotID,
+    Site      = site,
+    Plot      = plot,
+    Species   = spp,
+    Density   = estimate,
+    DensitySE = SE.estimate
+  ) %>%
+  mutate(
+    across(c(Site, Plot), as.character),
+    Species = case_when(
+      Species == "APFL" ~ "Mouse",
+      Species == "MYGL" ~ "Vole",
+      Species == "SMAM" ~ "Smam"
+    ),
+    DensityMin = Density - 1.96 * DensitySE,
+    DensityMax = Density + 1.96 * DensitySE,
+  )
+
+veg <- veg %>%
+  mutate(Site = new_sites(Site)) %>%
+  unite(PlotID, c(Site, Plot), sep = "_", remove = FALSE) %>%
+  filter(Height %in% c("Under50", "50_200")) %>%
+  mutate(
+    across(c(Site, Plot), as.character),
+    VegComp = rowMeans(across(Grass:"Other Tree"))
+  ) %>%
+  group_by(PlotID, Site, Plot) %>%
+  summarize(VegComp = mean(VegComp)) %>%
+  ungroup() %>%
+  mutate(VegComp = scale_one(VegComp))
+
+df <- mls %>%
+  left_join(dens) %>%
+  left_join(veg) %>%
+  filter(Species == "Smam")
+```
+
+## MLS complexity on a plot level
+
+```{r model-mls, results = "asis"}
+mod_mls <- lm(Density ~ 0 + Site + CovArea, data = df,
+              weights = 1 / (df$DensitySE)^2)
+
+stargazer(mod_mls, type = "html")
+```
+
+```{r plot-mls}
+coef_mls <- data.frame(
+  Site      = c("Göhrde", "Kamschlacken", "Tosterglope"),
+  Intercept = coef(mod_mls)[1:3],
+  Slope     = coef(mod_mls)[4]
+)
+
+ci_df <- function(mod, site, var) {
+  idx <- switch(site, Göhrde = 1, Kamschlacken = 2, Tosterglope = 3)
+
+  x <- seq.int(-3, 3, length.out = 100)
+  b <- coef(mod)
+  v <- vcov(mod)
+
+  mu <- b[idx] + x * b[4]
+  sigma <- sqrt(v[idx, idx] + x^2 * v[4, 4] + 2 * x * v[idx, 4])
+
+  df <- data.frame(
+    Site   = site,
+    tmp    = x,
+    RegMin = mu - 1.96 * sigma,
+    RegMax = mu + 1.96 * sigma
+  )
+
+  names(df)[2] <- var
+
+  df
+}
+
+ci_mls <- rbind(
+  ci_df(mod_mls, site = "Göhrde", var = "CovArea"),
+  ci_df(mod_mls, site = "Kamschlacken", var = "CovArea"),
+  ci_df(mod_mls, site = "Tosterglope", var = "CovArea")
+)
+
+ggplot(df, aes(CovArea, Density)) +
+  facet_wrap(vars(Site)) +
+  geom_abline(aes(intercept = Intercept, slope = Slope), data = coef_mls) +
+  geom_line(aes(y = RegMin), data = ci_mls, linetype = "dashed") +
+  geom_line(aes(y = RegMax), data = ci_mls, linetype = "dashed") +
+  geom_errorbar(aes(ymin = DensityMin, ymax = DensityMax), width = 0.3) +
+  geom_point(size = 3) +
+  coord_cartesian(xlim = c(min(df$CovArea) - 0.2, max(df$CovArea) + 0.2)) +
+  xlab("Standardized understory roughness") +
+  ylab("Small mammal density")
+```
+
+## Vegetation survey complexity on a plot level
+
+```{r model-veg, results = "asis"}
+mod_veg <- lm(Density ~ 0 + Site + VegComp, data = df,
+              weights = 1 / (df$DensitySE)^2)
+
+stargazer(mod_veg, type = "html")
+```
+
+```{r plot-veg}
+coef_veg <- data.frame(
+  Site      = c("Göhrde", "Kamschlacken", "Tosterglope"),
+  Intercept = coef(mod_veg)[1:3],
+  Slope     = coef(mod_veg)[4]
+)
+
+ci_veg <- rbind(
+  ci_df(mod_veg, site = "Göhrde", var = "VegComp"),
+  ci_df(mod_veg, site = "Kamschlacken", var = "VegComp"),
+  ci_df(mod_veg, site = "Tosterglope", var = "VegComp")
+)
+
+ggplot(df, aes(VegComp, Density)) +
+  facet_wrap(vars(Site)) +
+  geom_abline(aes(intercept = Intercept, slope = Slope), data = coef_veg) +
+  geom_line(aes(y = RegMin), data = ci_veg, linetype = "dashed") +
+  geom_line(aes(y = RegMax), data = ci_veg, linetype = "dashed") +
+  geom_errorbar(aes(ymin = DensityMin, ymax = DensityMax), width = 0.4) +
+  geom_point(size = 3) +
+  coord_cartesian(xlim = c(min(df$VegComp) - 0.2, max(df$VegComp) + 0.2)) +
+  xlab("Standardized vegetation cover") +
+  ylab("Small mammal density")
+```

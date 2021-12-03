@@ -1,0 +1,149 @@
+---
+title: "MLS-SMAM -- Trap -- Estimation"
+author: "Ieva, Scott, Hannes"
+date: "November 30, 2021"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+library(dplyr)
+library(mgcv)
+library(stringr)
+library(tidyr)
+```
+
+```{r data, include = FALSE}
+load("data/mls-smam.RData")
+
+scale_one <- function(x) {
+  scale(x)[, 1]
+}
+
+new_sites <- function(x) {
+  case_when(x == "1" ~ "Kamschlacken", x == "7" ~ "Göhrde",
+            x == "8" ~ "Tosterglope")
+}
+
+smam <- SMAMDATA %>%
+  unite(PlotID, c(Site, Plot), sep = "_", remove = FALSE) %>%
+  filter(
+    PlotID != "8_2",
+    Site %in% c(1, 7, 8),
+    SpeciesID %in% c("APFL", "APSY", "MYGL"),
+    Campaign == 5
+  ) %>%
+  mutate(
+    Site = new_sites(Site),
+    Plot = as.character(Plot),
+    TrapNum = str_remove(TrapNum, "\\.[0-9]+$"),
+    Daytime = case_when(
+      Check == "AM" ~ "Night",
+      Check == "MD" ~ "Day",
+      Check == "PM" ~ "Day"
+    ),
+    Species = case_when(
+      SpeciesID == "APFL" ~ "Mouse",
+      SpeciesID == "APSY" ~ "Mouse",
+      SpeciesID == "MYGL" ~ "Vole"
+    )
+  ) %>%
+  unite(PlotID, c(Site, Plot), sep = "_", remove = FALSE) %>%
+  unite(TrapID, c(PlotID, TrapNum), sep = "_", remove = FALSE) %>%
+  select(PlotID, TrapID, Site, Plot, TrapNum, Date, Daytime, Species)
+
+mls <- complexity %>%
+  filter(!is.na(CovArea)) %>%
+  mutate(
+    Site = new_sites(Site),
+    Plot = as.character(Plot),
+    across(c(CovArea, BoxDim), scale_one)
+  ) %>%
+  unite(PlotID, c(Site, Plot), sep = "_", remove = FALSE) %>%
+  unite(TrapID, c(PlotID, TrapNum), sep = "_", remove = FALSE) %>%
+  select(PlotID, TrapID, Site, Plot, TrapNum, CovArea, BoxDim)
+
+dates <- smam %>%
+  drop_na(Date) %>%
+  distinct(Site, Date, Daytime) %>%
+  arrange(Date, Daytime)
+
+no_traps <- SMAMDATA %>%
+  unite(PlotID, c(Site, Plot), sep = "_", remove = FALSE) %>%
+  filter(
+    PlotID != "8_2",
+    Site %in% c(1, 7, 8),
+    SpeciesID == "NOSE",
+    Campaign == 5
+  ) %>%
+  mutate(
+    Site = new_sites(Site),
+    Plot = as.character(Plot),
+    TrapNum = str_remove(TrapNum, "\\.[0-9]+$"),
+    Daytime = case_when(
+      Check == "AM" ~ "Night",
+      Check == "MD" ~ "Day",
+      Check == "PM" ~ "Day"
+    )
+  ) %>%
+  unite(PlotID, c(Site, Plot), sep = "_", remove = FALSE) %>%
+  unite(TrapID, c(PlotID, TrapNum), sep = "_", remove = FALSE) %>%
+  select(PlotID, TrapID, Site, Plot, TrapNum, Date, Daytime)
+
+df <- mls %>%
+  left_join(dates) %>%
+  anti_join(no_traps) %>%
+  left_join(smam) %>%
+  unite(Check, c(Date, Daytime), sep = "_", remove = FALSE) %>%
+  mutate(
+    across(c(PlotID, Site, TrapNum, Daytime, Check), as.factor),
+    Capture = case_when(
+      is.na(Species)     ~ 0L,
+      Species == "Mouse" ~ 1L,
+      Species == "Vole"  ~ 2L
+    )
+  ) %>%
+  select(PlotID, TrapID, Site, Plot, TrapNum, CovArea, BoxDim,
+         Date, Daytime, Check, Species, Capture)
+```
+
+```{r neighborhood, include = FALSE}
+nb <- lapply(levels(df$TrapNum), function(trap) {
+  x <- str_sub(trap, 1, 1)
+  x <- which(x == LETTERS)
+
+  y <- str_sub(trap, 2, 2)
+  y <- as.numeric(y)
+
+  x_nb <- x + c(-1, 1)
+  x_nb <- x_nb[x_nb >= 1 & x_nb <= 8]
+  x_nb <- str_c(LETTERS[x_nb], y)
+
+  y_nb <- y + c(-1, 1)
+  y_nb <- y_nb[y_nb >= 1 & y_nb <= 8]
+  y_nb <- str_c(LETTERS[x], y_nb)
+
+  c(x_nb, y_nb)
+})
+
+names(nb) <- levels(df$TrapNum)
+```
+
+## Multinomial logistic regression
+
+Be careful, this takes a long time to run:
+
+```{r model}
+mod <- gam(
+  formula = list(
+    Capture ~ CovArea + Daytime + Site + s(Check, bs = "re") + s(PlotID, bs = "re") +
+              s(TrapNum, bs = "mrf", by = PlotID, xt = list(nb = nb), id = 1),
+            ~ CovArea + Daytime + Site + s(Check, bs = "re") + s(PlotID, bs = "re") +
+              s(TrapNum, bs = "mrf", by = PlotID, xt = list(nb = nb), id = 2)
+  ),
+  family = multinom(K = 2),
+  data   = df,
+  method = "REML"
+)
+
+save.image("data/trap.RData")
+```
